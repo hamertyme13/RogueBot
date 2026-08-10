@@ -10,6 +10,8 @@ ROGUEBOT_MODEL = os.getenv("ROGUEBOT_MODEL", "gpt-4.1-mini")
 ROGUEBOT_NAME = os.getenv("ROGUEBOT_NAME", "RogueBot")
 USER_NAME = os.getenv("USER_NAME", "Joshua")
 
+WAKE_PHRASE = os.getenv("WAKE_PHRASE", "hey roguebot")
+
 
 def validate_config() -> None:
     """Validate required configuration values."""

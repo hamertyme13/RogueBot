@@ -3,12 +3,12 @@ import speech_recognition as sr
 
 
 class SpeechSystem:
-    """Handles microphone input and spoken output."""
+    """Handles RogueBot microphone input and spoken output."""
 
     def __init__(self) -> None:
         self.recognizer = sr.Recognizer()
-        self.engine = pyttsx3.init()
 
+        self.engine = pyttsx3.init()
         self.engine.setProperty("rate", 180)
         self.engine.setProperty("volume", 1.0)
 
@@ -27,45 +27,48 @@ class SpeechSystem:
                 return
 
     def speak(self, message: str) -> None:
-        """Speak and print a message."""
+        """Print and speak a message."""
 
         print(f"\nRogueBot: {message}\n")
 
         self.engine.say(message)
         self.engine.runAndWait()
 
-    def listen(self) -> str | None:
-        """Listen through the microphone and return recognized speech."""
+    def listen(
+        self,
+        timeout: int | None = None,
+        phrase_time_limit: int = 10,
+        show_status: bool = True,
+    ) -> str | None:
+        """
+        Listen through the microphone and return recognized speech.
+        """
 
         try:
             with sr.Microphone() as source:
-                print("Listening...")
 
-                self.recognizer.adjust_for_ambient_noise(
-                    source,
-                    duration=0.7,
-                )
+                if show_status:
+                    print("Listening...")
 
                 audio = self.recognizer.listen(
                     source,
-                    timeout=8,
-                    phrase_time_limit=15,
+                    timeout=timeout,
+                    phrase_time_limit=phrase_time_limit,
                 )
 
-            print("Processing speech...")
+            text = self.recognizer.recognize_google(audio)
 
-            spoken_text = self.recognizer.recognize_google(audio)
+            text = text.lower().strip()
 
-            print(f"You: {spoken_text}")
+            if show_status:
+                print(f"You: {text}")
 
-            return spoken_text
+            return text
 
         except sr.WaitTimeoutError:
-            print("I did not hear anything.")
             return None
 
         except sr.UnknownValueError:
-            print("I could not understand what was said.")
             return None
 
         except sr.RequestError as error:
@@ -75,3 +78,16 @@ class SpeechSystem:
         except OSError as error:
             print(f"Microphone error: {error}")
             return None
+
+    def calibrate_microphone(self) -> None:
+        """Calibrate the microphone for ambient noise."""
+
+        print("Calibrating microphone...")
+
+        with sr.Microphone() as source:
+            self.recognizer.adjust_for_ambient_noise(
+                source,
+                duration=1,
+            )
+
+        print("Microphone ready.")

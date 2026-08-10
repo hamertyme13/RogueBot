@@ -1,5 +1,5 @@
-from assistant import RogueBotAssistant
-from config import ROGUEBOT_NAME, USER_NAME
+from commands import CommandProcessor
+from config import ROGUEBOT_NAME, USER_NAME, WAKE_PHRASE
 from speech import SpeechSystem
 
 
@@ -8,57 +8,130 @@ EXIT_COMMANDS = {
     "goodbye roguebot",
     "exit",
     "quit",
-    "shut down",
     "shutdown",
-    "stop listening",
+    "shut down",
 }
 
 
 def should_exit(command: str) -> bool:
-    """Return True when the user asks RogueBot to stop."""
+    """Check whether RogueBot should shut down."""
 
-    normalized_command = command.lower().strip().rstrip(".!?")
+    normalized = command.lower().strip().rstrip(".!?")
 
-    return normalized_command in EXIT_COMMANDS
+    return normalized in EXIT_COMMANDS
+
+
+def wake_phrase_detected(text: str) -> bool:
+    """Check for common versions of RogueBot's wake phrase."""
+
+    text = text.lower().strip()
+
+    print(f'DEBUG wake input: "{text}"')
+
+    wake_phrases = {
+        "hey roguebot",
+        "hey rogue bot",
+        "hey robot",
+        "roguebot",
+        "rogue bot",
+    }
+
+    return any(
+        phrase in text
+        for phrase in wake_phrases
+    )
 
 
 def main() -> None:
-    """Run the RogueBot voice-assistant loop."""
+    """Run RogueBot."""
 
     print("=" * 50)
     print(f"{ROGUEBOT_NAME} Desktop Assistant")
     print("=" * 50)
 
-    try:
-        assistant = RogueBotAssistant()
-        speech = SpeechSystem()
+    speech = SpeechSystem()
+    commands = CommandProcessor()
 
-    except Exception as error:
-        print(f"Startup error: {error}")
-        return
+    speech.calibrate_microphone()
 
     speech.speak(
-        f"Hello {USER_NAME}. {ROGUEBOT_NAME} is online. "
-        "What can I help you with?"
+        f"{ROGUEBOT_NAME} is online. "
+        f"Say {WAKE_PHRASE} when you need me."
     )
 
-    while True:
-        command = speech.listen()
+    print(f'\nWaiting for wake phrase: "{WAKE_PHRASE}"\n')
 
-        if command is None:
+    while True:
+
+        # -------------------------
+        # IDLE MODE
+        # -------------------------
+
+        wake_input = speech.listen(
+            timeout=5,
+            phrase_time_limit=4,
+            show_status=False,
+        )
+
+        if wake_input is None:
             continue
 
-        if should_exit(command):
-            speech.speak(
-                f"Goodbye {USER_NAME}. Shutting down."
-            )
+        # Allow shutdown even while idle
+        if should_exit(wake_input):
+            speech.speak(f"Goodbye {USER_NAME}. RogueBot is shutting down.")
             break
 
-        speech.speak("Let me think about that.")
+        if not wake_phrase_detected(wake_input):
+            continue
 
-        response = assistant.get_response(command)
+        print(f"Wake phrase detected: {wake_input}")
+
+        speech.speak("I'm listening.")
+
+        # -------------------------
+        # COMMAND MODE
+        # -------------------------
+
+        command = speech.listen(
+            timeout=12,
+            phrase_time_limit=12,
+            show_status=True,
+        )
+
+        if command is None:
+            speech.speak(
+                "I didn't hear a command."
+            )
+
+            print(
+                f'Waiting for wake phrase: "{WAKE_PHRASE}"'
+            )
+
+            continue
+
+        # -------------------------
+        # SHUTDOWN
+        # -------------------------
+
+        if should_exit(command):
+
+            speech.speak(
+                f"Goodbye {USER_NAME}. RogueBot is shutting down."
+            )
+
+            break
+
+        # -------------------------
+        # PROCESS COMMAND
+        # -------------------------
+
+        response = commands.process(command)
 
         speech.speak(response)
+
+        print(
+            f'\nWaiting for wake phrase: "{WAKE_PHRASE}"\n'
+        )
 
 
 if __name__ == "__main__":
