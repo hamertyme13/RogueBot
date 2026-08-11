@@ -1,6 +1,8 @@
 from commands import CommandProcessor
 from config import ROGUEBOT_NAME, USER_NAME, WAKE_PHRASE
+import face
 from speech import SpeechSystem
+from face import FaceState, RogueBotFace
 
 
 EXIT_COMMANDS = {
@@ -51,6 +53,7 @@ def main() -> None:
 
     speech = SpeechSystem()
     commands = CommandProcessor()
+    face = RogueBotFace()
 
     speech.calibrate_microphone()
 
@@ -61,11 +64,16 @@ def main() -> None:
 
     print(f'\nWaiting for wake phrase: "{WAKE_PHRASE}"\n')
 
+    face.set_state(FaceState.SLEEPING)
+
     while True:
 
         # -------------------------
         # IDLE MODE
         # -------------------------
+
+        face.set_state(FaceState.SLEEPING)
+        face.update()
 
         wake_input = speech.listen(
             timeout=5,
@@ -78,13 +86,21 @@ def main() -> None:
 
         # Allow shutdown even while idle
         if should_exit(wake_input):
+
+            face.set_state(FaceState.SLEEPING)
+            face.update()
+
             speech.speak(f"Goodbye {USER_NAME}. RogueBot is shutting down.")
+            face.close()
             break
 
         if not wake_phrase_detected(wake_input):
             continue
 
         print(f"Wake phrase detected: {wake_input}")
+
+        face.set_state(FaceState.LISTENING)
+        face.update()
 
         speech.speak("I'm listening.")
 
@@ -115,23 +131,36 @@ def main() -> None:
 
         if should_exit(command):
 
+            face.set_state(FaceState.SLEEPING)
+            face.update()
+
             speech.speak(
                 f"Goodbye {USER_NAME}. RogueBot is shutting down."
             )
+
+            face.close()
 
             break
 
         # -------------------------
         # PROCESS COMMAND
         # -------------------------
+        face.set_state(FaceState.THINKING)
+        face.update()
 
         response = commands.process(command)
+
+        face.set_state(FaceState.SPEAKING)
+        face.update()
 
         speech.speak(response)
 
         print(
             f'\nWaiting for wake phrase: "{WAKE_PHRASE}"\n'
         )
+
+        face.set_state(FaceState.SLEEPING)
+        face.update()
 
 
 if __name__ == "__main__":
