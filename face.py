@@ -1,5 +1,8 @@
+import random
 import tkinter as tk
 from enum import Enum
+from queue import Empty, Queue
+from threading import Event
 
 
 class FaceState(Enum):
@@ -11,7 +14,7 @@ class FaceState(Enum):
 
 
 class RogueBotFace:
-    """Graphical face and visual state system for RogueBot."""
+    """Graphical face and animation system for RogueBot."""
 
     def __init__(self) -> None:
         self.root = tk.Tk()
@@ -27,7 +30,6 @@ class RogueBotFace:
             bg="black",
             highlightthickness=0,
         )
-
         self.canvas.pack(fill="both", expand=True)
 
         self.status_label = tk.Label(
@@ -37,16 +39,23 @@ class RogueBotFace:
             fg="white",
             bg="black",
         )
-
         self.status_label.pack(pady=10)
 
         self.state = FaceState.IDLE
+        self.closed = False
 
         self.left_eye = None
         self.right_eye = None
 
         self._draw_face()
+
         self.set_state(FaceState.IDLE)
+
+        # Start animation systems
+        self._schedule_blink()
+
+        self.thinking_direction = 1
+        self.thinking_animation_id = None
 
     def _draw_face(self) -> None:
         """Create RogueBot's eyes."""
@@ -71,8 +80,29 @@ class RogueBotFace:
             outline="",
         )
 
+    def _stop_thinking_animation(self) -> None:
+        """Stop the thinking animation."""
+
+        if self.thinking_animation_id is None:
+            return
+
+        try:
+            self.root.after_cancel(
+                self.thinking_animation_id
+            )
+        except tk.TclError:
+            pass
+
+        self.thinking_animation_id = None
+
     def set_state(self, state: FaceState) -> None:
         """Change RogueBot's visual state."""
+
+        if state != FaceState.THINKING:
+            self._stop_thinking_animation()
+
+        if self.closed:
+            return
 
         self.state = state
 
@@ -96,41 +126,11 @@ class RogueBotFace:
             self._speaking_face()
             self.status_label.config(text="SPEAKING")
 
-        self.root.update_idletasks()
-
     def _idle_face(self) -> None:
-        self.canvas.coords(
-            self.left_eye,
-            140,
-            110,
-            240,
-            210,
-        )
-
-        self.canvas.coords(
-            self.right_eye,
-            360,
-            110,
-            460,
-            210,
-        )
+        self._open_eyes()
 
     def _sleeping_face(self) -> None:
-        self.canvas.coords(
-            self.left_eye,
-            140,
-            155,
-            240,
-            165,
-        )
-
-        self.canvas.coords(
-            self.right_eye,
-            360,
-            155,
-            460,
-            165,
-        )
+        self._close_eyes()
 
     def _listening_face(self) -> None:
         self.canvas.coords(
@@ -150,6 +150,7 @@ class RogueBotFace:
         )
 
     def _thinking_face(self) -> None:
+        """Animate eyes moving left and right."""
         self.canvas.coords(
             self.left_eye,
             150,
@@ -164,6 +165,37 @@ class RogueBotFace:
             125,
             450,
             190,
+        )
+
+        self._start_thinking_animation()
+
+    def _start_thinking_animation(self) -> None:
+        """Animate RogueBot's eyes while thinking."""
+
+        if self.state != FaceState.THINKING:
+            return
+
+        offset = 10 * self.thinking_direction
+
+        self.canvas.move(
+            self.left_eye,
+            offset,
+            0,
+        )
+
+        self.canvas.move(
+            self.right_eye,
+            offset,
+            0,
+        )
+
+        self.thinking_direction *= -1
+
+        self.thinking_animation_id = (
+            self.root.after(
+                400,
+                self._start_thinking_animation,
+            )
         )
 
     def _speaking_face(self) -> None:
@@ -183,17 +215,154 @@ class RogueBotFace:
             215,
         )
 
-    def update(self) -> None:
-        """Process pending GUI events."""
+    def _open_eyes(self) -> None:
+        self.canvas.coords(
+            self.left_eye,
+            140,
+            110,
+            240,
+            210,
+        )
+
+        self.canvas.coords(
+            self.right_eye,
+            360,
+            110,
+            460,
+            210,
+        )
+
+    def _close_eyes(self) -> None:
+        self.canvas.coords(
+            self.left_eye,
+            140,
+            155,
+            240,
+            165,
+        )
+
+        self.canvas.coords(
+            self.right_eye,
+            360,
+            155,
+            460,
+            165,
+        )
+
+    # --------------------------------------------------
+    # BLINK ANIMATION
+    # --------------------------------------------------
+
+    def _schedule_blink(self) -> None:
+        """Schedule the next automatic blink."""
+
+        if self.closed:
+            return
+
+        delay = random.randint(2500, 6000)
+
+        self.root.after(
+            delay,
+            self._blink,
+        )
+
+    def _blink(self) -> None:
+        """Perform a quick eye blink."""
+
+        if self.closed:
+            return
+
+        # Sleeping eyes are already closed.
+        if self.state != FaceState.SLEEPING:
+            self._close_eyes()
+
+            self.root.after(
+                150,
+                self._restore_current_state,
+            )
+
+        self._schedule_blink()
+
+    def _restore_current_state(self) -> None:
+        """Restore expression after a blink."""
+
+        self.set_state(self.state)
+
+    # --------------------------------------------------
+    # THREAD COMMUNICATION
+    # --------------------------------------------------
+
+    def _process_state_queue(
+        self,
+        state_queue: Queue,
+        shutdown_event: Event,
+    ) -> None:
+        """Read state changes sent by the robot worker."""
+
+        if self.closed:
+            return
 
         try:
-            self.root.update()
+            while True:
+                state = state_queue.get_nowait()
 
-        except tk.TclError:
+                if isinstance(state, FaceState):
+                    self.set_state(state)
+
+        except Empty:
             pass
+
+        if shutdown_event.is_set():
+            self.close()
+            return
+
+        self.root.after(
+            50,
+            self._process_state_queue,
+            state_queue,
+            shutdown_event,
+        )
+
+    def run(
+        self,
+        state_queue: Queue,
+        shutdown_event: Event,
+    ) -> None:
+        """Run the Tkinter event loop."""
+
+        self.root.protocol(
+            "WM_DELETE_WINDOW",
+            lambda: self._handle_window_close(
+                shutdown_event
+            ),
+        )
+
+        self.root.after(
+            50,
+            self._process_state_queue,
+            state_queue,
+            shutdown_event,
+        )
+
+        self.root.mainloop()
+
+    def _handle_window_close(
+        self,
+        shutdown_event: Event,
+    ) -> None:
+        """Handle the user manually closing the face."""
+
+        shutdown_event.set()
+
+        self.close()
 
     def close(self) -> None:
         """Close RogueBot's display."""
+
+        if self.closed:
+            return
+
+        self.closed = True
 
         try:
             self.root.destroy()
