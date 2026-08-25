@@ -1,35 +1,49 @@
-import psutil
+import subprocess
 
 
 def get_temperature() -> str:
-    """Return available system temperature information."""
+    """Return CPU temperature on macOS using the 'osx-cpu-temp' tool."""
 
     try:
-        temperatures = psutil.sensors_temperatures()
-
-    except AttributeError:
-        return (
-            "Temperature sensors are not currently available "
-            "on this system."
+        result = subprocess.run(
+            ["osx-cpu-temp"],
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
 
-    if not temperatures:
-        return (
-            "I cannot currently read system temperature sensors."
+        if result.returncode == 0:
+            temp_str = result.stdout.strip()
+            return f"CPU temperature is {temp_str}."
+
+    except FileNotFoundError:
+        pass
+
+    except subprocess.TimeoutExpired:
+        pass
+
+    # Fallback: try iStats gem
+    try:
+        result = subprocess.run(
+            ["istats", "cpu", "--no-graphs"],
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
 
-    readings = []
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                if "cpu" in line.lower() and "°" in line:
+                    temp_str = line.strip()
+                    return f"CPU temperature: {temp_str}."
 
-    for sensor_name, entries in temperatures.items():
+    except FileNotFoundError:
+        pass
 
-        for entry in entries:
+    except subprocess.TimeoutExpired:
+        pass
 
-            if entry.current is not None:
-                readings.append(
-                    f"{sensor_name} is {entry.current:.1f} degrees Celsius"
-                )
-
-    if not readings:
-        return "I could not find any temperature readings."
-
-    return ". ".join(readings) + "."
+    return (
+        "Temperature sensors are not available. "
+        "Install osx-cpu-temp with Homebrew to enable this feature."
+    )

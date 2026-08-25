@@ -1,14 +1,21 @@
-from queue import Queue
+import time
+from queue import Empty, Queue
 from threading import Event, Thread
 
 from commands import CommandProcessor
 from config import (
     ROGUEBOT_NAME,
+    USE_LOCAL_WAKE_WORD,
     USER_NAME,
     WAKE_PHRASE,
+    WAKE_WORD_MODEL,
+    WAKE_WORD_THRESHOLD,
 )
 from face import FaceState, RogueBotFace
+from logger import log
 from speech import SpeechSystem
+from startup_check import run_startup_checks
+import skills.timer_skill as timer_skill
 
 
 EXIT_COMMANDS = {
@@ -19,6 +26,10 @@ EXIT_COMMANDS = {
     "shutdown",
     "shut down",
 }
+
+# How long (seconds) RogueBot stays alert after the last response
+# before going back to sleep and waiting for the wake phrase again.
+CONVERSATION_TIMEOUT = 30
 
 
 def should_exit(command: str) -> bool:
@@ -39,8 +50,6 @@ def wake_phrase_detected(text: str) -> bool:
 
     text = text.lower().strip()
 
-    print(f'DEBUG wake input: "{text}"')
-
     wake_phrases = {
         "hey roguebot",
         "hey rogue bot",
@@ -53,6 +62,107 @@ def wake_phrase_detected(text: str) -> bool:
         phrase in text
         for phrase in wake_phrases
     )
+
+
+def _run_conversation(
+    speech: SpeechSystem,
+    commands: CommandProcessor,
+    state_queue: Queue,
+    shutdown_event: Event,
+    notification_queue: Queue,
+) -> bool:
+    """
+    Run a single conversation session — listen for commands until
+    the user goes silent for CONVERSATION_TIMEOUT seconds or says
+    a shutdown phrase.
+
+    Returns True if shutdown was requested, False otherwise.
+    """
+
+    state_queue.put(FaceState.LISTENING)
+    speech.speak("I'm listening.")
+
+    last_interaction = time.monotonic()
+
+    while not shutdown_event.is_set():
+
+        # --------------------------------
+        # DRAIN NOTIFICATION QUEUE
+        # (timer / reminder alerts)
+        # --------------------------------
+
+        try:
+            while True:
+                notification = notification_queue.get_nowait()
+                state_queue.put(FaceState.SPEAKING)
+                speech.speak(notification)
+                last_interaction = time.monotonic()
+        except Empty:
+            pass
+
+        elapsed = time.monotonic() - last_interaction
+
+        if elapsed >= CONVERSATION_TIMEOUT:
+            speech.speak("Going back to sleep. Say the wake phrase when you need me.")
+            return False
+
+        # --------------------------------
+        # LISTEN FOR NEXT COMMAND
+        # --------------------------------
+
+        state_queue.put(FaceState.LISTENING)
+
+        command = speech.listen(
+            timeout=10,
+            phrase_time_limit=12,
+            show_status=True,
+        )
+
+        if command is None:
+            # Silence — keep waiting until timeout
+            continue
+
+        # --------------------------------
+        # SHUTDOWN
+        # --------------------------------
+
+        if should_exit(command):
+
+            state_queue.put(FaceState.SLEEPING)
+
+            speech.speak(
+                f"Goodbye {USER_NAME}. "
+                "RogueBot is shutting down."
+            )
+
+            shutdown_event.set()
+            return True
+
+        # Reset interaction timer as soon as we hear a command,
+        # so processing / speaking time doesn't eat into the window.
+        last_interaction = time.monotonic()
+
+        # --------------------------------
+        # THINKING
+        # --------------------------------
+
+        state_queue.put(FaceState.THINKING)
+
+        response = commands.process(command)
+
+        # --------------------------------
+        # SPEAKING
+        # --------------------------------
+
+        state_queue.put(FaceState.SPEAKING)
+
+        # Skip speaking if streaming AI already delivered the response
+        # sentence-by-sentence via speak_fn during processing.
+        if not commands._streamed_last:
+            speech.speak(response)
+        commands._streamed_last = False
+
+    return False
 
 
 def robot_worker(
@@ -68,21 +178,47 @@ def robot_worker(
     speech = SpeechSystem()
     commands = CommandProcessor()
 
+    # Inject speech callbacks so streaming AI and dictation work.
+    commands._speak_fn = speech.speak
+    commands._listen_fn = speech.listen
+
+    # Give the timer skill a queue so expired timers speak aloud.
+    notification_queue: Queue = Queue()
+    timer_skill.notification_queue = notification_queue
+
+    # Start the reminder checker — it speaks via the same queue.
+    from skills.reminder_skill import start_reminder_checker
+    start_reminder_checker(notification_queue.put)
+
     speech.calibrate_microphone()
+
+    # Run startup diagnostics and speak a brief summary.
+    log.info("Running startup checks.")
+    status_summary = run_startup_checks()
+    log.info("Startup summary: %s", status_summary)
 
     speech.speak(
         f"{ROGUEBOT_NAME} is online. "
+        f"{status_summary} "
         f"Say {WAKE_PHRASE} when you need me."
     )
 
-    state_queue.put(
-        FaceState.SLEEPING
-    )
+    state_queue.put(FaceState.SLEEPING)
+    log.info('Waiting for wake phrase: "%s"', WAKE_PHRASE)
 
-    print(
-        f'\nWaiting for wake phrase: '
-        f'"{WAKE_PHRASE}"\n'
-    )
+    if USE_LOCAL_WAKE_WORD:
+        from wake_word import WakeWordDetector
+
+        detector = WakeWordDetector(
+            model_name=WAKE_WORD_MODEL,
+            threshold=WAKE_WORD_THRESHOLD,
+        )
+        log.info(
+            "Local wake-word detection active (model: %s, threshold: %s)",
+            WAKE_WORD_MODEL, WAKE_WORD_THRESHOLD,
+        )
+    else:
+        detector = None
 
     while not shutdown_event.is_set():
 
@@ -90,127 +226,63 @@ def robot_worker(
         # SLEEPING / WAKE WORD MODE
         # --------------------------------
 
-        state_queue.put(
-            FaceState.SLEEPING
-        )
+        state_queue.put(FaceState.SLEEPING)
 
-        wake_input = speech.listen(
-            timeout=2,
-            phrase_time_limit=4,
-            show_status=False,
-        )
+        if detector is not None:
+            # --- LOCAL WAKE-WORD PATH ---
+            # Blocks until the model fires; no cloud calls.
+            detector.wait_for_wake_word()
 
-        if wake_input is None:
-            continue
+            if shutdown_event.is_set():
+                break
 
-        # Allow shutdown without wake phrase
-        if should_exit(wake_input):
+            print(f"Wake word detected (model: {WAKE_WORD_MODEL})")
 
-            state_queue.put(
-                FaceState.SLEEPING
+        else:
+            # --- GOOGLE STT WAKE-PHRASE PATH ---
+            wake_input = speech.listen(
+                timeout=2,
+                phrase_time_limit=4,
+                show_status=False,
             )
 
-            speech.speak(
-                f"Goodbye {USER_NAME}. "
-                "RogueBot is shutting down."
-            )
+            if wake_input is None:
+                continue
 
-            shutdown_event.set()
+            # Allow shutdown without wake phrase
+            if should_exit(wake_input):
 
+                state_queue.put(FaceState.SLEEPING)
+
+                speech.speak(
+                    f"Goodbye {USER_NAME}. "
+                    "RogueBot is shutting down."
+                )
+
+                shutdown_event.set()
+                return
+
+            if not wake_phrase_detected(wake_input):
+                continue
+
+            print(f"Wake phrase detected: {wake_input}")
+
+        # --------------------------------
+        # CONVERSATION MODE
+        # --------------------------------
+
+        shutdown_requested = _run_conversation(
+            speech,
+            commands,
+            state_queue,
+            shutdown_event,
+            notification_queue,
+        )
+
+        if shutdown_requested:
             return
 
-        if not wake_phrase_detected(wake_input):
-            continue
-
-        print(
-            f"Wake phrase detected: {wake_input}"
-        )
-
-        # --------------------------------
-        # LISTENING MODE
-        # --------------------------------
-
-        state_queue.put(
-            FaceState.LISTENING
-        )
-
-        speech.speak(
-            "I'm listening."
-        )
-
-        command = speech.listen(
-            timeout=12,
-            phrase_time_limit=12,
-            show_status=True,
-        )
-
-        if command is None:
-
-            speech.speak(
-                "I didn't hear a command."
-            )
-
-            state_queue.put(
-                FaceState.SLEEPING
-            )
-
-            print(
-                f'Waiting for wake phrase: '
-                f'"{WAKE_PHRASE}"'
-            )
-
-            continue
-
-        # --------------------------------
-        # SHUTDOWN
-        # --------------------------------
-
-        if should_exit(command):
-
-            state_queue.put(
-                FaceState.SLEEPING
-            )
-
-            speech.speak(
-                f"Goodbye {USER_NAME}. "
-                "RogueBot is shutting down."
-            )
-
-            shutdown_event.set()
-
-            return
-
-        # --------------------------------
-        # THINKING
-        # --------------------------------
-
-        state_queue.put(
-            FaceState.THINKING
-        )
-
-        response = commands.process(
-            command
-        )
-
-        # --------------------------------
-        # SPEAKING
-        # --------------------------------
-
-        state_queue.put(
-            FaceState.SPEAKING
-        )
-
-        speech.speak(
-            response
-        )
-
-        # --------------------------------
-        # RETURN TO SLEEP
-        # --------------------------------
-
-        state_queue.put(
-            FaceState.SLEEPING
-        )
+        state_queue.put(FaceState.SLEEPING)
 
         print(
             f'\nWaiting for wake phrase: '

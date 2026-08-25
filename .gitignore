@@ -3,4 +3,13 @@ venv/
 __pycache__/
 *.pyc
 .DS_Store
+.pytest_cache/
+
+# User data — keep the data/ directory but ignore personal files
 data/memory.json
+data/notes.json
+data/reminders.json
+data/conversation.json
+data/command_history.json
+data/roguebot.log
+data/roguebot.log.*

@@ -1,8 +1,15 @@
 import json
 import urllib.error
 import urllib.request
+from collections.abc import Callable
+from pathlib import Path
 
+from config import OLLAMA_MODEL, OLLAMA_URL
 from memory import MemoryManager
+
+
+_HISTORY_FILE = Path("data/conversation.json")
+_MAX_HISTORY = 20  # turns kept on disk
 
 
 class LocalAI:
@@ -10,14 +17,38 @@ class LocalAI:
 
     def __init__(
         self,
-        model: str = "llama3.2",
-        url: str = "http://localhost:11434/api/chat",
+        model: str = OLLAMA_MODEL,
+        url: str = OLLAMA_URL,
     ) -> None:
         self.model = model
         self.url = url
+        self.url_stream = url  # same endpoint, different payload
         self.memory = MemoryManager()
 
-        self.messages = []
+        self.messages = self._load_history()
+
+    def _load_history(self) -> list[dict]:
+        """Load persisted conversation turns from disk."""
+
+        if not _HISTORY_FILE.exists():
+            return []
+
+        try:
+            with _HISTORY_FILE.open("r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return []
+
+    def _save_history(self) -> None:
+        """Persist the current conversation window to disk."""
+
+        _HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            with _HISTORY_FILE.open("w", encoding="utf-8") as f:
+                json.dump(self.messages, f, indent=2, ensure_ascii=False)
+        except OSError as error:
+            print(f"Could not save conversation history: {error}")
 
     def _build_system_prompt(self) -> str:
         """Create RogueBot's personality and memory context."""
@@ -55,80 +86,135 @@ Keep spoken answers fairly short unless more detail is requested.
 Do not use markdown formatting unless specifically requested.
 """.strip()
 
-    def ask(self, user_message: str) -> str:
-        """Send a message to the local Ollama model."""
-
-        system_message = {
-            "role": "system",
-            "content": self._build_system_prompt(),
-        }
-
-        conversation = [
-            system_message,
+    def _build_conversation(self, user_message: str) -> list[dict]:
+        return [
+            {"role": "system", "content": self._build_system_prompt()},
             *self.messages,
-            {
-                "role": "user",
-                "content": user_message,
-            },
+            {"role": "user", "content": user_message},
         ]
+
+    def _record_turn(self, user_message: str, answer: str) -> None:
+        self.messages.append({"role": "user", "content": user_message})
+        self.messages.append({"role": "assistant", "content": answer})
+        self.messages = self.messages[-_MAX_HISTORY:]
+        self._save_history()
+
+    # ------------------------------------------------------------------
+    # Non-streaming ask (used as fallback / simple queries)
+    # ------------------------------------------------------------------
+
+    def ask(self, user_message: str) -> str | None:
+        """Send a message and return the complete response string."""
 
         payload = {
             "model": self.model,
-            "messages": conversation,
+            "messages": self._build_conversation(user_message),
             "stream": False,
         }
 
-        encoded_payload = json.dumps(payload).encode("utf-8")
-
-        request = urllib.request.Request(
+        req = urllib.request.Request(
             self.url,
-            data=encoded_payload,
-            headers={
-                "Content-Type": "application/json",
-            },
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
             method="POST",
         )
 
         try:
-            with urllib.request.urlopen(
-                request,
-                timeout=120,
-            ) as response:
-
-                data = json.loads(
-                    response.read().decode("utf-8")
-                )
+            with urllib.request.urlopen(req, timeout=120) as response:
+                data = json.loads(response.read().decode("utf-8"))
 
             answer = data["message"]["content"].strip()
-
-            self.messages.append(
-                {
-                    "role": "user",
-                    "content": user_message,
-                }
-            )
-
-            self.messages.append(
-                {
-                    "role": "assistant",
-                    "content": answer,
-                }
-            )
-
-            # Prevent unlimited conversation growth
-            self.messages = self.messages[-12:]
-
+            self._record_turn(user_message, answer)
             return answer
 
         except urllib.error.URLError:
-            return (
-                "My local AI system is unavailable. "
-                "Make sure Ollama is running."
-            )
-
+            return None
         except Exception as error:
             print(f"Local AI error: {error}")
+            return None
 
-            return (
-                "I encountered an error while processing that request."
-            )
+    # ------------------------------------------------------------------
+    # Streaming ask — yields sentences as they arrive
+    # ------------------------------------------------------------------
+
+    def ask_streaming(
+        self,
+        user_message: str,
+        sentence_callback: Callable[[str], None],
+    ) -> str | None:
+        """
+        Stream the response from Ollama.
+
+        Calls `sentence_callback(sentence)` each time a complete sentence
+        is available so the speech system can start speaking immediately.
+
+        Returns the full response string on success, None on failure.
+        """
+
+        payload = {
+            "model": self.model,
+            "messages": self._build_conversation(user_message),
+            "stream": True,
+        }
+
+        req = urllib.request.Request(
+            self.url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+
+        try:
+            full_text = ""
+            buffer = ""
+
+            with urllib.request.urlopen(req, timeout=120) as response:
+                for raw_line in response:
+                    line = raw_line.decode("utf-8").strip()
+                    if not line:
+                        continue
+
+                    try:
+                        chunk = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+
+                    token = chunk.get("message", {}).get("content", "")
+                    buffer += token
+                    full_text += token
+
+                    # Emit complete sentences to the callback
+                    while True:
+                        # Find the earliest sentence-ending punctuation
+                        end = -1
+                        for punct in (".", "!", "?", "\n"):
+                            idx = buffer.find(punct)
+                            if idx != -1 and (end == -1 or idx < end):
+                                end = idx
+
+                        if end == -1:
+                            break
+
+                        sentence = buffer[: end + 1].strip()
+                        buffer = buffer[end + 1:]
+
+                        if sentence:
+                            sentence_callback(sentence)
+
+                    if chunk.get("done"):
+                        break
+
+            # Emit any leftover text
+            if buffer.strip():
+                sentence_callback(buffer.strip())
+
+            answer = full_text.strip()
+            if answer:
+                self._record_turn(user_message, answer)
+            return answer or None
+
+        except urllib.error.URLError:
+            return None
+        except Exception as error:
+            print(f"Local AI streaming error: {error}")
+            return None
