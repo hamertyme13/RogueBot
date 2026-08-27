@@ -1,4 +1,5 @@
 import time
+from vision import VisionSystem
 from queue import Empty, Queue
 from threading import Event, Thread
 
@@ -56,6 +57,7 @@ def wake_phrase_detected(text: str) -> bool:
         "hey robot",
         "roguebot",
         "rogue bot",
+        "hey rogue",
     }
 
     return any(
@@ -289,6 +291,50 @@ def robot_worker(
             f'"{WAKE_PHRASE}"\n'
         )
 
+def vision_worker(
+    state_queue: Queue,
+    shutdown_event: Event,
+) -> None:
+    """Track faces and send eye-position events to the GUI."""
+
+    vision = VisionSystem(
+        camera_index=1
+    )
+
+    if not vision.start():
+        print("Vision worker could not start.")
+        return
+    
+    print("Vision worker online.")
+
+    try:
+        while not shutdown_event.is_set():
+            frame = vision.read_frame()
+
+            if frame is None:
+                time.sleep(0.05)
+                continue
+
+            faces = vision.detect_faces(frame)
+
+            primary_face = vision.get_primary_face(faces)
+
+            if primary_face is not None:
+                direction = (
+                    vision.get_horizontal_direction(
+                        frame,
+                        primary_face
+                    )
+                )
+
+                state_queue.put(("look", direction))
+
+            time.sleep(0.05)
+
+    finally:
+        vision.stop()
+        print("Vision worker stopped.")
+
 
 def main() -> None:
     """Start RogueBot."""
@@ -305,6 +351,8 @@ def main() -> None:
     # Tkinter must be created on main thread.
     face = RogueBotFace()
 
+    # Voice / assistant thread
+
     worker = Thread(
         target=robot_worker,
         args=(
@@ -315,7 +363,20 @@ def main() -> None:
         name="RogueBotWorker",
     )
 
+    # Camera / vision thread
+
+    vision_thread = Thread(
+        target=vision_worker,
+        args=(
+            state_queue,
+            shutdown_event,
+        ),
+        daemon=True,
+        name="RogueBotVision",
+    )
+
     worker.start()
+    vision_thread.start()
 
     # Main thread belongs to Tkinter.
     face.run(
@@ -328,6 +389,10 @@ def main() -> None:
     shutdown_event.set()
 
     worker.join(
+        timeout=3,
+    )
+
+    vision_thread.join(
         timeout=3,
     )
 

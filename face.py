@@ -364,9 +364,15 @@ class RogueBotFace:
 
         try:
             while True:
-                state = state_queue.get_nowait()
-                if isinstance(state, FaceState):
-                    self.set_state(state)
+                event = state_queue.get_nowait()
+                if isinstance(event, FaceState):
+                    self.set_state(event)
+                elif (
+                    isinstance(event, tuple)
+                    and len(event) == 2
+                    and event[0] == "look"
+                ):
+                    self.look_at(event[1])
         except Empty:
             pass
 
@@ -421,3 +427,22 @@ class RogueBotFace:
             self.root.destroy()
         except tk.TclError:
             pass
+
+    def look_at(self, direction: str) -> None:
+        """Move RogueBot's pupils toward a detected face."""
+
+        if self.state == FaceState.SLEEPING:
+            return
+        
+        self._show_pupils()
+        self._center_pupils()
+
+        offset = 0
+
+        if direction == "left":
+            offset = -12
+        elif direction == "right":
+            offset = 12
+
+        self.canvas.move(self.left_pupil, offset, 0)
+        self.canvas.move(self.right_pupil, offset, 0)
