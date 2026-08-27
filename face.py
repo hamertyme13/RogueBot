@@ -58,13 +58,6 @@ class RogueBotFace:
         self.right_pupil = None
         self.mouth = None
 
-        self._draw_face()
-
-        self.set_state(FaceState.IDLE)
-
-        # Blink animation
-        self._schedule_blink()
-
         # Thinking animation state
         self.thinking_direction = 1
         self.thinking_animation_id = None
@@ -72,6 +65,15 @@ class RogueBotFace:
         # Speaking mouth animation state
         self.speaking_open = False
         self.speaking_animation_id = None
+
+        self._draw_face()
+
+        self.set_state(FaceState.IDLE)
+
+        # Blink animation
+        self._schedule_blink()
+
+        
 
     # --------------------------------------------------
     # DRAWING

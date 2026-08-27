@@ -47,6 +47,7 @@ class CommandProcessor:
         # Injected by main.py so streaming AI can speak sentence-by-sentence
         self._speak_fn = None
         self._listen_fn = None
+        self._streamed_last = False  # True if last response was streamed and spoken already
 
     # --------------------------------------------------
     # AI FALLBACK  (with streaming)
