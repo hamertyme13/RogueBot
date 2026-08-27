@@ -11,6 +11,8 @@ import urllib.request
 from config import OLLAMA_URL, OPENAI_API_KEY
 from logger import log
 
+import socket
+
 
 def _check_ollama() -> bool:
     """Return True if the Ollama API is reachable."""
@@ -32,9 +34,11 @@ def _check_openai() -> bool:
 def _check_internet() -> bool:
     """Return True if we can reach a well-known host."""
     try:
-        urllib.request.urlopen("https://1.1.1.1", timeout=3)
-        return True
-    except Exception:
+       connection = socket.create_connection(("1.1.1.1", 443), timeout=3)
+       connection.close()
+       return True
+    except OSError as error:
+        log.warning("Internet check failed: %s", error)
         return False
 
 
